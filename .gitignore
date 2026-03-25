@@ -1,0 +1,26 @@
+# Terraform — NEVER commit these
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+tfplan_*
+terraform.tfvars
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Log files
+*.log
+health_report.json
+audit_trail.jsonl
+
+# Environment files
+.env
+
+# VS Code
+.vscode/
+
+# Mac
+.DS_Store
