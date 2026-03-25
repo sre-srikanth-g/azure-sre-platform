@@ -1,0 +1,24 @@
+# =============================================================================
+# terraform.tfvars.example
+# Author: Srikanth Gandikota
+#
+# HOW TO USE:
+#   1. Copy this file: cp terraform.tfvars.example terraform.tfvars
+#   2. Fill in your own values in terraform.tfvars
+#   3. NEVER commit terraform.tfvars — it contains your password
+#      It is already listed in .gitignore so Git will ignore it
+# =============================================================================
+
+# Project settings
+project_name = "sre-demo"
+environment  = "dev"
+location     = "East US"
+
+# VM settings
+# Standard_B1s = 1 vCPU, 1GB RAM — free tier eligible in Azure
+vm_size        = "Standard_B1s"
+admin_username = "sreadmin"
+admin_password = "CHANGE_ME_Use_A_Strong_Password_123!"
+
+# Monitoring — alerts will be sent to this email
+alert_email = "sre.srikanthg@gmail.com"
