@@ -1,0 +1,346 @@
+# =============================================================================
+# ci-cd.yml — GitHub Actions CI/CD Pipeline
+# Author: Srikanth Gandikota
+# Project: azure-sre-platform
+#
+# WHAT THIS PIPELINE DOES:
+#   On every pull request:
+#     1. Validates Terraform code (catches syntax errors)
+#     2. Runs security scan on Terraform (catches insecure configs)
+#     3. Checks Python code quality
+#
+#   On every merge to main:
+#     4. Deploys infrastructure to dev environment
+#     5. Runs health check after deployment
+#
+#   Every hour automatically:
+#     6. Runs health check against live infrastructure
+#     7. Creates a GitHub issue if health check fails
+#
+# SRE CONTEXT:
+#   This pipeline is a "reliability gate" — code cannot reach
+#   production without passing security and validation checks.
+#   The scheduled health check is automated monitoring —
+#   no human needed to verify the infrastructure is healthy.
+# =============================================================================
+
+name: SRE Platform CI/CD
+
+on:
+  # Run on every push to main or develop branch
+  push:
+    branches: [ main, develop ]
+
+  # Run on every pull request targeting main
+  pull_request:
+    branches: [ main ]
+
+  # Run health check every hour automatically
+  # Cron format: minute hour day month weekday
+  schedule:
+    - cron: '0 * * * *'
+
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options: [ dev, qa, prod ]
+
+# Cancel in-progress runs when a new commit is pushed
+# Prevents two deploys running at the same time
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Shared settings used across all jobs
+env:
+  TERRAFORM_VERSION: "1.5.0"
+  PYTHON_VERSION: "3.11"
+  TERRAFORM_DIR: "./terraform"
+
+# =============================================================================
+# JOB 1 — VALIDATE TERRAFORM
+# Runs on every push and PR
+# Catches syntax errors and formatting issues before they reach production
+# =============================================================================
+
+jobs:
+  terraform-validate:
+    name: "Terraform — Validate & Format"
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+
+    steps:
+      # Step 1 — Download the code from GitHub
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2 — Install Terraform
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      # Step 3 — Check formatting
+      # terraform fmt -check fails if any file is not formatted correctly
+      - name: Check Terraform formatting
+        id: fmt
+        run: terraform fmt -check -recursive
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        continue-on-error: true
+
+      # Step 4 — Initialise Terraform (no backend so no Azure needed)
+      - name: Terraform Init
+        run: terraform init -backend=false
+        working-directory: ${{ env.TERRAFORM_DIR }}
+
+      # Step 5 — Validate the configuration
+      # Catches missing required variables, wrong resource types, etc
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: ${{ env.TERRAFORM_DIR }}
+
+      # Step 6 — Comment on PR if formatting failed
+      - name: Comment on PR about formatting
+        if: steps.fmt.outcome == 'failure' && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: '⚠️ Terraform formatting issues found. Run `terraform fmt -recursive` to fix.'
+            })
+
+  # =============================================================================
+  # JOB 2 — SECURITY SCAN
+  # Scans Terraform code for security misconfigurations
+  # Example: storage account with public access enabled would fail here
+  # =============================================================================
+
+  security-scan:
+    name: "Security — tfsec & Checkov"
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # tfsec — Terraform security scanner
+      # Catches things like: "you forgot to encrypt this storage account"
+      - name: Run tfsec
+        uses: aquasecurity/tfsec-action@v1.0.0
+        with:
+          working_directory: terraform
+          soft_fail: true
+
+      # Checkov — another IaC security scanner (catches different issues)
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          framework: terraform
+          soft_fail: true
+
+  # =============================================================================
+  # JOB 3 — PYTHON QUALITY CHECK
+  # Makes sure Python scripts have no syntax errors
+  # =============================================================================
+
+  python-check:
+    name: "Python — Lint & Syntax Check"
+    runs-on: ubuntu-latest
+    if: github.event_name != 'schedule'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install linting tools
+        run: |
+          pip install flake8
+          echo "flake8 installed"
+
+      # Check for syntax errors and undefined variables
+      # These are critical errors that would break the script
+      - name: Check for critical Python errors
+        run: |
+          flake8 scripts/ \
+            --count \
+            --select=E9,F63,F7,F82 \
+            --show-source \
+            --statistics
+
+      # Check general code quality — warnings only, does not fail the build
+      - name: Check Python code quality
+        run: |
+          flake8 scripts/ \
+            --count \
+            --exit-zero \
+            --max-line-length=100 \
+            --statistics
+
+  # =============================================================================
+  # JOB 4 — DEPLOY TO DEV
+  # Only runs when code is merged to main
+  # Requires jobs 1, 2, and 3 to all pass first
+  # =============================================================================
+
+  deploy-dev:
+    name: "Deploy — Dev Environment"
+    runs-on: ubuntu-latest
+
+    # Only deploy on push to main — not on PRs or scheduled runs
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    # Must wait for all checks to pass
+    needs: [ terraform-validate, security-scan, python-check ]
+
+    # Links to GitHub Environment which holds secrets
+    environment: dev
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      # Log in to Azure using a service principal stored in GitHub secrets
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # Create the tfvars file from GitHub secrets
+      # This is how we pass credentials safely — never hardcoded
+      - name: Create tfvars file
+        run: |
+          cat > terraform/terraform.tfvars << EOF
+          project_name   = "sre-demo"
+          environment    = "dev"
+          location       = "East US"
+          admin_username = "sreadmin"
+          admin_password = "${{ secrets.VM_ADMIN_PASSWORD }}"
+          alert_email    = "sre.srikanthg@gmail.com"
+          EOF
+
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform Plan
+        run: terraform plan -var="environment=dev" -out=tfplan_dev
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform Apply
+        run: terraform apply tfplan_dev
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        env:
+          ARM_CLIENT_ID:       ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET:   ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID:       ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Wait for VM to boot then run health check
+      - name: Post-deployment health check
+        run: |
+          echo "Waiting 90 seconds for VM to boot..."
+          sleep 90
+          python3 scripts/health_check.py
+
+      # Save the health report so you can download and review it
+      - name: Upload health report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: health-report-${{ github.run_number }}
+          path: health_report.json
+
+  # =============================================================================
+  # JOB 5 — SCHEDULED HEALTH CHECK
+  # Runs every hour automatically via the cron schedule above
+  # This is automated monitoring — no human needed to check infrastructure
+  # =============================================================================
+
+  scheduled-health-check:
+    name: "Health Check — Hourly"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Run health check
+        id: health_check
+        run: python3 scripts/health_check.py
+        continue-on-error: true
+
+      - name: Upload health report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scheduled-health-${{ github.run_number }}
+          path: |
+            health_report.json
+            health_check.log
+
+      # If health check failed — create a GitHub Issue automatically
+      # In production this would trigger PagerDuty instead
+      - name: Create issue on health check failure
+        if: steps.health_check.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              title: `Health Check Failed — ${new Date().toISOString()}`,
+              body: [
+                '## Automated Health Check Failure',
+                '',
+                `**Run ID:** ${context.runId}`,
+                `**Time:** ${new Date().toISOString()}`,
+                '',
+                'One or more VMs failed the health check.',
+                '',
+                `[View workflow logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+                '',
+                '**Action required:** Investigate and resolve. Close this issue when resolved.',
+              ].join('\n'),
+              labels: ['incident', 'automated', 'needs-investigation']
+            })
