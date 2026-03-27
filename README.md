@@ -142,7 +142,7 @@ Calls the VM module and monitoring module with environment-specific settings.
 ### terraform/modules/vm/
 Reusable VM module. Called from main.tf with different parameters
 for dev, qa, and prod — same code, different settings.
-This is modular Terraform as used at Intact Insurance across 70+ repositories.
+This is modular Terraform as used at our work place across 70+ repositories.
 
 ### terraform/modules/monitoring/
 Azure Monitor alert rules and Log Analytics Workspace.
@@ -165,7 +165,7 @@ for compliance in regulated environments (healthcare, financial services).
 
 ### slo/slo_definition.md
 Formal SLI/SLO definitions with KQL queries to measure them.
-Based on the 99.5% uptime SLA maintained at AXIS Specialty Canada.
+Based on the 99.5% uptime SLA maintained at our company.
 
 ### runbooks/incident_response.md
 Full P1 incident response process — from alert acknowledgement
