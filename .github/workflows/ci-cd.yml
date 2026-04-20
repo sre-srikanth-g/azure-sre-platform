@@ -38,7 +38,7 @@ on:
   # Run health check every hour automatically
   # Cron format: minute hour day month weekday
   schedule:
-    - cron: '0 * * * *'
+    - cron: ' * * * *'
 
   # Allow manual trigger from GitHub UI
   workflow_dispatch:
